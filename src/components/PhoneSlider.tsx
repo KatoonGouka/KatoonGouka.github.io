@@ -58,9 +58,13 @@ export default function PhoneSlider() {
   // swipe/drag state
   const trackRef = useRef<HTMLDivElement | null>(null)
   const [isDragging, setIsDragging] = useState(false)
-  const [dragStartX, setDragStartX] = useState<number | null>(null)
-  const [dragDeltaX, setDragDeltaX] = useState(0)
   const [restOffsetPercent, setRestOffsetPercent] = useState(0) // keeps user swipe offset when not using buttons
+
+  // perf: avoid re-render on every pointer move
+  const isDraggingRef = useRef(false)
+  const dragStartXRef = useRef<number | null>(null)
+  const dragDeltaXRef = useRef(0)
+  const rafIdRef = useRef<number | null>(null)
 
   function getViewportWidth(): number {
     const viewportEl = trackRef.current?.parentElement
@@ -69,40 +73,70 @@ export default function PhoneSlider() {
 
   function onPointerDown(e: React.PointerEvent<HTMLDivElement>) {
     setIsDragging(true)
-    setDragStartX(e.clientX)
-    setDragDeltaX(0)
+    // refs for rAF-driven drag updates
+    isDraggingRef.current = true
+    dragStartXRef.current = e.clientX
+    dragDeltaXRef.current = 0
+    // hint GPU acceleration while dragging
+    if (trackRef.current) trackRef.current.style.willChange = 'transform'
     ;(e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId)
   }
 
   function onPointerMove(e: React.PointerEvent<HTMLDivElement>) {
-    if (!isDragging || dragStartX === null) return
-    const dx = e.clientX - dragStartX
-    setDragDeltaX(dx)
+    if (!isDraggingRef.current || dragStartXRef.current === null) return
+    const dx = e.clientX - dragStartXRef.current
+    dragDeltaXRef.current = dx
+    // schedule a single frame
+    if (rafIdRef.current == null) {
+      rafIdRef.current = requestAnimationFrame(() => {
+        rafIdRef.current = null
+        const width = getViewportWidth()
+        const deltaPercent = (dragDeltaXRef.current / width) * 100
+        const slide = 100 / itemsPerView
+        const basePercent = -(index * slide) + restOffsetPercent
+        const minPercent = -(maxIndex * slide)
+        const maxPercent = 0
+        const percent = Math.max(minPercent, Math.min(maxPercent, basePercent + deltaPercent))
+        if (trackRef.current) {
+          trackRef.current.style.transform = `translate3d(${percent}%, 0, 0)`
+        }
+      })
+    }
   }
 
   function onPointerUp(e: React.PointerEvent<HTMLDivElement>) {
-    if (!isDragging) return
+    if (!isDraggingRef.current) return
     const width = getViewportWidth()
+    const dx = (dragStartXRef.current != null ? e.clientX - dragStartXRef.current : 0)
     const threshold = Math.max(40, width * 0.15)
-    if (Math.abs(dragDeltaX) > threshold) {
-      if (dragDeltaX > 0) {
-        prev()
-      } else {
-        next()
-      }
-    }
-    // Persist user's final position as an offset, clamped to bounds
-    const deltaPercent = (dragDeltaX / width) * 100
-    const basePercent = -(index * (100 / itemsPerView))
-    const minPercent = -(maxIndex * (100 / itemsPerView))
-    const maxPercent = 0
-    const desiredPercent = basePercent + restOffsetPercent + deltaPercent
-    const clamped = Math.max(minPercent, Math.min(maxPercent, desiredPercent))
-    setRestOffsetPercent(clamped - basePercent)
 
+    // decide target index without triggering intermediate renders
+    let targetIndex = index
+    if (Math.abs(dx) > threshold) {
+      targetIndex = dx > 0 ? Math.max(0, index - 1) : Math.min(maxIndex, index + 1)
+    }
+
+    const slide = 100 / itemsPerView
+    const basePercentForTarget = -(targetIndex * slide)
+    const minPercent = -(maxIndex * slide)
+    const maxPercent = 0
+    const deltaPercent = (dx / width) * 100
+    const desiredPercent = (-(index * slide) + restOffsetPercent) + deltaPercent
+    const clamped = Math.max(minPercent, Math.min(maxPercent, desiredPercent))
+
+    setIndex(targetIndex)
+    setRestOffsetPercent(clamped - basePercentForTarget)
+
+    // cleanup drag state and return control to React styles
     setIsDragging(false)
-    setDragStartX(null)
-    setDragDeltaX(0)
+    isDraggingRef.current = false
+    dragStartXRef.current = null
+    dragDeltaXRef.current = 0
+    if (rafIdRef.current != null) {
+      cancelAnimationFrame(rafIdRef.current)
+      rafIdRef.current = null
+    }
+    if (trackRef.current) trackRef.current.style.willChange = ''
     ;(e.currentTarget as HTMLElement).releasePointerCapture?.(e.pointerId)
   }
 
@@ -128,7 +162,7 @@ export default function PhoneSlider() {
   const slidePercent = 100 / itemsPerView
   const isPrevDisabled = index === 0
   const isNextDisabled = index === maxIndex
-  const dragPercent = isDragging ? (dragDeltaX / getViewportWidth()) * 100 : 0
+  const basePercent = -(index * slidePercent) + restOffsetPercent
 
   return (
     <section id="cases" className="relative isolate scroll-mt-24 md:scroll-mt-24 bg-black py-16 md:py-24">
@@ -194,7 +228,7 @@ export default function PhoneSlider() {
               <div
                 ref={trackRef}
                 className={`flex pr-0 md:pr-8 ${isDragging ? 'transition-none' : 'transition-transform duration-500 ease-out'}`}
-                style={{ transform: `translateX(${-(index * slidePercent) + restOffsetPercent + dragPercent}%)` }}
+                style={{ transform: isDragging ? undefined : `translate3d(${basePercent}%, 0, 0)`, willChange: 'transform' }}
               >
                 {items.map((item, i) => (
                   <div
@@ -216,6 +250,8 @@ export default function PhoneSlider() {
                             alt="Phone preview"
                             className="relative z-20 h-auto w-full -mt-10 md:-mt-16 object-contain"
                             draggable={false}
+                            loading="lazy"
+                            decoding="async"
                           />
                         </div>
                       </div>
