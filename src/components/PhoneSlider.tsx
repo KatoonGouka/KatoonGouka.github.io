@@ -25,6 +25,21 @@ function useItemsPerView() {
   return items
 }
 
+function useIsMobile() {
+  const [isMobile, setIsMobile] = useState(false)
+  useEffect(() => {
+    function compute() {
+      const w = window.innerWidth
+      const coarse = typeof window.matchMedia === 'function' && window.matchMedia('(pointer: coarse)').matches
+      setIsMobile(w < 768 || coarse)
+    }
+    compute()
+    window.addEventListener('resize', compute)
+    return () => window.removeEventListener('resize', compute)
+  }, [])
+  return isMobile
+}
+
 export default function PhoneSlider() {
   const items: SliderItem[] = useMemo(
     () => Array.from({ length: 7 }, (_, i) => ({ id: i, image: phoneImage })),
@@ -52,8 +67,11 @@ export default function PhoneSlider() {
   ]
 
   const itemsPerView = useItemsPerView()
+  const isMobile = useIsMobile()
+  const swipeDisabled = isMobile
   const maxIndex = Math.max(0, items.length - itemsPerView)
   const [index, setIndex] = useState(0)
+  const [navLock, setNavLock] = useState(false)
 
   // swipe/drag state
   const trackRef = useRef<HTMLDivElement | null>(null)
@@ -141,6 +159,11 @@ export default function PhoneSlider() {
   }
 
   function prev() {
+    if (isMobile) {
+      const target = Math.max(0, index - 1)
+      void goToIndexMobile(target)
+      return
+    }
     setIndex((v) => {
       const nextIndex = Math.max(0, v - 1)
       setRestOffsetPercent(0) // center on button navigation
@@ -148,6 +171,11 @@ export default function PhoneSlider() {
     })
   }
   function next() {
+    if (isMobile) {
+      const target = Math.min(maxIndex, index + 1)
+      void goToIndexMobile(target)
+      return
+    }
     setIndex((v) => {
       const nextIndex = Math.min(maxIndex, v + 1)
       setRestOffsetPercent(0) // center on button navigation
@@ -163,6 +191,39 @@ export default function PhoneSlider() {
   const isPrevDisabled = index === 0
   const isNextDisabled = index === maxIndex
   const basePercent = -(index * slidePercent) + restOffsetPercent
+
+  // --- image preload for mobile to avoid visible loading during navigation ---
+  async function preloadImage(src: string): Promise<void> {
+    try {
+      await new Promise<void>((resolve) => {
+        const img = new Image()
+        img.onload = () => resolve()
+        img.onerror = () => resolve() // fail open
+        // decode if supported
+        img.src = src
+        // Safari may not expose decode on created Image
+        ;(img as any).decode?.().then(() => resolve()).catch(() => resolve())
+      })
+    } catch {}
+  }
+
+  async function ensureSlideReady(targetIndex: number): Promise<void> {
+    const indexesToPreload = [targetIndex, targetIndex + 1, targetIndex - 1]
+    const unique = Array.from(new Set(indexesToPreload)).filter((i) => i >= 0 && i < items.length)
+    await Promise.all(unique.map((i) => preloadImage(items[i].image)))
+  }
+
+  async function goToIndexMobile(targetIndex: number): Promise<void> {
+    if (navLock || targetIndex === index) return
+    setNavLock(true)
+    try {
+      await ensureSlideReady(targetIndex)
+      setRestOffsetPercent(0)
+      setIndex(targetIndex)
+    } finally {
+      setNavLock(false)
+    }
+  }
 
   return (
     <section id="cases" className="relative isolate scroll-mt-24 md:scroll-mt-24 bg-black py-16 md:py-24">
@@ -218,12 +279,12 @@ export default function PhoneSlider() {
           />
           <div className="overflow-visible rounded-2xl bg-transparent">
             <div
-              className="relative overflow-visible pt-28 md:pt-28 touch-pan-y select-none cursor-grab active:cursor-grabbing"
-              onPointerDown={onPointerDown}
-              onPointerMove={onPointerMove}
-              onPointerUp={onPointerUp}
-              onPointerCancel={onPointerUp}
-              onPointerLeave={onPointerUp}
+              className={`relative overflow-visible pt-28 md:pt-28 ${swipeDisabled ? '' : 'touch-pan-y select-none cursor-grab active:cursor-grabbing'}`}
+              onPointerDown={swipeDisabled ? undefined : onPointerDown}
+              onPointerMove={swipeDisabled ? undefined : onPointerMove}
+              onPointerUp={swipeDisabled ? undefined : onPointerUp}
+              onPointerCancel={swipeDisabled ? undefined : onPointerUp}
+              onPointerLeave={swipeDisabled ? undefined : onPointerUp}
             >
               <div
                 ref={trackRef}
